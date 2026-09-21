@@ -1,304 +1,86 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_localizations/flutter_localizations.dart';
-import 'package:sqflite/sqflite.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import 'package:path/path.dart';
-import 'package:intl/intl.dart';
-import 'package:uuid/uuid.dart';
-
-const red = Color(0xFFC8102E);
-final money = NumberFormat.currency(locale: 'ar_EG', symbol: 'ج.م ', decimalDigits: 2);
-
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  sqfliteFfiInit();
-  databaseFactory = databaseFactoryFfi;
-  await PosDb.instance.init();
-  runApp(const MandoApp());
-}
-
-class PosDb {
-  PosDb._();
-  static final instance = PosDb._();
-  late Database db;
-
-  Future<void> init() async {
-    final root = await getDatabasesPath();
-    db = await openDatabase(join(root, 'mando_pos.db'), version: 1,
-      onCreate: (d, _) async {
-        await d.execute('''CREATE TABLE products(
-          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
-          price REAL NOT NULL, category TEXT NOT NULL,
-          imagePath TEXT, printerId TEXT, active INTEGER NOT NULL DEFAULT 1)''');
-        await d.execute('''CREATE TABLE orders(
-          id TEXT PRIMARY KEY, createdAt TEXT NOT NULL, subtotal REAL NOT NULL,
-          discount REAL NOT NULL, total REAL NOT NULL, paymentMethod TEXT NOT NULL,
-          status TEXT NOT NULL, cashier TEXT NOT NULL)''');
-        await d.execute('''CREATE TABLE order_items(
-          id INTEGER PRIMARY KEY AUTOINCREMENT, orderId TEXT NOT NULL,
-          productId INTEGER, name TEXT NOT NULL, qty INTEGER NOT NULL,
-          price REAL NOT NULL, notes TEXT, printerId TEXT)''');
-        await d.execute('''CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)''');
-        await d.execute('''CREATE TABLE audit(
-          id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, at TEXT, details TEXT)''');
-        await d.insert('settings', {'key':'reset_pin','value':'2580'});
-        await d.insert('settings', {'key':'cashier_name','value':'الكاشير'});
-        final samples = [
-          ['وجبة دجاج',125.0,'وجبات'], ['برجر لحم',95.0,'برجر'],
-          ['بطاطس',35.0,'إضافات'], ['كولا',20.0,'مشروبات'],
-          ['وجبة عائلية',320.0,'وجبات'], ['ساندوتش دجاج',65.0,'ساندوتشات']
-        ];
-        for (final p in samples) {
-          await d.insert('products', {'name':p[0],'price':p[1],'category':p[2]});
-        }
-      });
-  }
-
-  Future<List<Map<String,dynamic>>> products() =>
-    db.query('products', where:'active=1', orderBy:'category,name');
-  Future<List<Map<String,dynamic>>> orders() =>
-    db.query('orders', where:'status=?', whereArgs:['paid'], orderBy:'createdAt DESC');
-  Future<List<Map<String,dynamic>>> items(String id) =>
-    db.query('order_items', where:'orderId=?', whereArgs:[id]);
-
-  Future<void> checkout(List<CartLine> cart, double discount, String method) async {
-    if (cart.isEmpty) return;
-    final subtotal = cart.fold<double>(0,(s,l)=>s+l.price*l.qty);
-    final total = (subtotal-discount).clamp(0,double.infinity).toDouble();
-    final id = const Uuid().v4();
-    await db.transaction((txn) async {
-      await txn.insert('orders', {
-        'id':id,'createdAt':DateTime.now().toIso8601String(),
-        'subtotal':subtotal,'discount':discount,'total':total,
-        'paymentMethod':method,'status':'paid','cashier':'الكاشير'
-      });
-      for(final l in cart) {
-        await txn.insert('order_items', {
-          'orderId':id,'productId':l.id,'name':l.name,'qty':l.qty,
-          'price':l.price,'notes':l.notes,'printerId':l.printerId
-        });
-      }
-    });
-  }
-}
-
-class CartLine {
-  final int id; final String name; final double price;
-  final String? printerId; int qty; String notes;
-  CartLine({required this.id,required this.name,required this.price,
-    this.printerId,this.qty=1,this.notes=''});
-  double get total=>price*qty;
-}
-
-class MandoApp extends StatelessWidget {
-  const MandoApp({super.key});
-  @override Widget build(BuildContext context)=>MaterialApp(
-    debugShowCheckedModeBanner:false, title:'Mando Restaurant POS',
-    locale:const Locale('ar'), supportedLocales:const [Locale('ar'),Locale('en')],
-    localizationsDelegates:const [GlobalMaterialLocalizations.delegate,
-      GlobalWidgetsLocalizations.delegate,GlobalCupertinoLocalizations.delegate],
-    theme:ThemeData(useMaterial3:true,colorScheme:ColorScheme.fromSeed(seedColor:red),
-      scaffoldBackgroundColor:const Color(0xFFF6F6F6), appBarTheme:const AppBarTheme(
-        backgroundColor:red,foregroundColor:Colors.white)),
-    home:const PosHome());
-}
-
-class PosHome extends StatefulWidget {
-  const PosHome({super.key});
-  @override State<PosHome> createState()=>_PosHomeState();
-}
-class _PosHomeState extends State<PosHome> {
-  int tab=0;
-  @override Widget build(BuildContext context) {
-    final pages=[const CashierPage(),const SalesPage(),const ProductsPage(),const SettingsPage()];
-    return Directionality(textDirection:TextDirection.rtl,child:Scaffold(
-      appBar:AppBar(title:const Text('MANDO POS  |  نظام كاشير المطعم'),
-        actions:[IconButton(onPressed:()=>setState(()=>tab=1),icon:const Icon(Icons.receipt_long))]),
-      body:pages[tab],
-      bottomNavigationBar:NavigationBar(selectedIndex:tab,onDestinationSelected:(v)=>setState(()=>tab=v),
-        destinations:const [
-          NavigationDestination(icon:Icon(Icons.point_of_sale),label:'الكاشير'),
-          NavigationDestination(icon:Icon(Icons.history),label:'المبيعات'),
-          NavigationDestination(icon:Icon(Icons.restaurant_menu),label:'الأصناف'),
-          NavigationDestination(icon:Icon(Icons.settings),label:'الإعدادات'),
-        ]),
-    ));
-  }
-}
-
-class CashierPage extends StatefulWidget {
-  const CashierPage({super.key});
-  @override State<CashierPage> createState()=>_CashierPageState();
-}
-class _CashierPageState extends State<CashierPage> {
-  List<Map<String,dynamic>> products=[]; List<CartLine> cart=[];
-  String category='الكل', search=''; double discount=0;
-  final searchCtl=TextEditingController();
-  @override void initState(){super.initState();load();}
-  Future<void> load() async {products=await PosDb.instance.products();if(mounted)setState((){});}
-  List<String> get categories=>['الكل',...{for(final p in products) p['category'] as String}];
-  List<Map<String,dynamic>> get filtered=>products.where((p)=>
-    (category=='الكل'||p['category']==category)&&
-    (p['name'] as String).toLowerCase().contains(search.toLowerCase())).toList();
-  double get subtotal=>cart.fold(0,(s,l)=>s+l.total);
-  @override Widget build(BuildContext context)=>LayoutBuilder(builder:(context,c) {
-    final wide=c.maxWidth>800;
-    return Row(children:[
-      Expanded(flex:wide?7:6,child:Column(children:[
-        Padding(padding:const EdgeInsets.all(10),child:TextField(controller:searchCtl,
-          decoration:const InputDecoration(prefixIcon:Icon(Icons.search),hintText:'ابحث عن وجبة أو صنف',
-            border:OutlineInputBorder()),onChanged:(v)=>setState(()=>search=v))),
-        SizedBox(height:48,child:ListView(scrollDirection:Axis.horizontal,children:categories.map((x)=>
-          Padding(padding:const EdgeInsets.symmetric(horizontal:4),child:ChoiceChip(label:Text(x),
-            selected:category==x,onSelected:(_)=>setState(()=>category=x)))).toList())),
-        Expanded(child:GridView.builder(padding:const EdgeInsets.all(8),
-          gridDelegate:SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount:wide?3:2,childAspectRatio:1.12,crossAxisSpacing:8,mainAxisSpacing:8),
-          itemCount:filtered.length,itemBuilder:(context,i){
-            final p=filtered[i]; return InkWell(onTap:()=>add(p),child:Card(clipBehavior:Clip.antiAlias,
-              child:Column(mainAxisAlignment:MainAxisAlignment.center,children:[
-                const Icon(Icons.fastfood,size:38,color:red),
-                Padding(padding:const EdgeInsets.all(5),child:Text(p['name'],textAlign:TextAlign.center,
-                  style:const TextStyle(fontWeight:FontWeight.bold))),
-                Text(money.format(p['price']),style:const TextStyle(color:red,fontWeight:FontWeight.bold)),
-                const Icon(Icons.add_circle,color:red)
-              ])));
-          }))
-      ])),
-      const VerticalDivider(width:1),
-      Expanded(flex:wide?4:5,child:cartPanel())
-    ]);
-  });
-  void add(Map<String,dynamic> p){
-    final i=cart.indexWhere((l)=>l.id==p['id']);
-    setState(()=>i>=0?cart[i].qty++:cart.add(CartLine(id:p['id'],name:p['name'],
-      price:(p['price'] as num).toDouble(),printerId:p['printerId'])));
-  }
-  Widget cartPanel()=>Column(children:[
-    Container(width:double.infinity,padding:const EdgeInsets.all(12),color:Colors.white,
-      child:const Text('الأوردر الحالي',style:TextStyle(fontSize:20,fontWeight:FontWeight.bold))),
-    Expanded(child:cart.isEmpty?const Center(child:Text('اختار الأصناف لبدء الأوردر')):
-      ListView(children:cart.map((l)=>ListTile(title:Text(l.name),
-        subtitle:Text('${money.format(l.price)} × ${l.qty}'),
-        trailing:Row(mainAxisSize:MainAxisSize.min,children:[
-          IconButton(onPressed:()=>setState(()=>l.qty++),icon:const Icon(Icons.add_circle,color:Colors.green)),
-          IconButton(onPressed:()=>setState(()=>l.qty>1?l.qty--:cart.remove(l)),icon:const Icon(Icons.remove_circle,color:red))
-        ]) )).toList())),
-    Padding(padding:const EdgeInsets.all(12),child:Column(children:[
-      Row(mainAxisAlignment:MainAxisAlignment.spaceBetween,children:[const Text('الإجمالي'),Text(money.format(subtotal),style:const TextStyle(fontWeight:FontWeight.bold))]),
-      const SizedBox(height:8),
-      SizedBox(width:double.infinity,child:FilledButton.icon(
-        style:FilledButton.styleFrom(backgroundColor:red,padding:const EdgeInsets.all(15)),
-        onPressed:cart.isEmpty?null:pay,icon:const Icon(Icons.payments),label:const Text('الدفع وحفظ الأوردر')))
-    ]))
-  ]);
-  Future<void> pay() async {
-    String method='كاش';
-    final chosen=await showDialog<String>(context:context,builder:(ctx)=>AlertDialog(
-      title:const Text('تأكيد الدفع'),content:Column(mainAxisSize:MainAxisSize.min,children:[
-        Text('الإجمالي: ${money.format(subtotal)}'),
-        const SizedBox(height:12),
-        DropdownButtonFormField<String>(value:method,items:['كاش','فيزا','محفظة'].map((m)=>DropdownMenuItem(value:m,child:Text(m))).toList(),
-          onChanged:(v){if(v!=null)method=v;})
-      ]),actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('إلغاء')),
-        FilledButton(onPressed:()=>Navigator.pop(ctx,method),child:const Text('تأكيد الدفع'))]));
-    if(chosen==null)return;
-    await PosDb.instance.checkout(cart,discount,chosen);
-    if(!mounted)return;
-    setState(()=>cart=[]);
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تم حفظ الأوردر في سجل المبيعات')));
-  }
-}
-
-class SalesPage extends StatefulWidget {
-  const SalesPage({super.key});
-  @override State<SalesPage> createState()=>_SalesPageState();
-}
-class _SalesPageState extends State<SalesPage>{
-  List<Map<String,dynamic>> rows=[];
-  @override void initState(){super.initState();load();}
-  Future<void> load()async{rows=await PosDb.instance.orders();if(mounted)setState((){});}
-  @override Widget build(BuildContext context)=>RefreshIndicator(onRefresh:load,child:ListView(
-    padding:const EdgeInsets.all(12),children:[
-      Text('سجل المبيعات (${rows.length})',style:const TextStyle(fontSize:21,fontWeight:FontWeight.bold)),
-      const SizedBox(height:8),
-      ...rows.map((o)=>Card(child:ListTile(leading:const Icon(Icons.receipt,color:red),
-        title:Text('فاتورة ${o['id'].toString().substring(0,8)}'),
-        subtitle:Text('${DateFormat('yyyy/MM/dd  hh:mm a').format(DateTime.parse(o['createdAt']))} • ${o['paymentMethod']}'),
-        trailing:Text(money.format(o['total']),style:const TextStyle(fontWeight:FontWeight.bold)),
-        onTap:()=>showDialog(context:context,builder:(ctx)=>AlertDialog(
-          title:const Text('تفاصيل الفاتورة'),
-          content:FutureBuilder<List<Map<String,dynamic>>>(future:PosDb.instance.items(o['id']),
-            builder:(ctx,s)=>SizedBox(width:350,child:!s.hasData?const CircularProgressIndicator():
-              Column(mainAxisSize:MainAxisSize.min,children:s.data!.map((it)=>Text('${it['name']} × ${it['qty']} — ${money.format((it['price'] as num)* (it['qty'] as num))}')).toList()))),
-          actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('إغلاق'))]))))),
-    ]));
-}
-
-class ProductsPage extends StatefulWidget {
-  const ProductsPage({super.key});
-  @override State<ProductsPage> createState()=>_ProductsPageState();
-}
-class _ProductsPageState extends State<ProductsPage>{
-  List<Map<String,dynamic>> rows=[];
-  @override void initState(){super.initState();load();}
-  Future<void> load()async{rows=await PosDb.instance.products();if(mounted)setState((){});}
-  Future<void> addProduct()async{
-    final n=TextEditingController(),p=TextEditingController(),c=TextEditingController(text:'وجبات');
-    final ok=await showDialog<bool>(context:context,builder:(ctx)=>AlertDialog(title:const Text('إضافة صنف'),
-      content:Column(mainAxisSize:MainAxisSize.min,children:[
-        TextField(controller:n,decoration:const InputDecoration(labelText:'اسم الصنف')),
-        TextField(controller:p,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'السعر')),
-        TextField(controller:c,decoration:const InputDecoration(labelText:'القسم')),
-      ]),actions:[TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('إلغاء')),
-        FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('حفظ'))]));
-    if(ok==true&&n.text.trim().isNotEmpty&&(double.tryParse(p.text)??0)>0){
-      await PosDb.instance.db.insert('products',{'name':n.text.trim(),'price':double.parse(p.text),'category':c.text.trim().isEmpty?'عام':c.text.trim()});
-      await load();
-    }
-  }
-  @override Widget build(BuildContext context)=>Scaffold(
-    floatingActionButton:FloatingActionButton.extended(backgroundColor:red,onPressed:addProduct,
-      icon:const Icon(Icons.add,color:Colors.white),label:const Text('إضافة صنف',style:TextStyle(color:Colors.white))),
-    body:ListView(padding:const EdgeInsets.all(12),children:[
-      const Text('إدارة الأصناف',style:TextStyle(fontSize:21,fontWeight:FontWeight.bold)),
-      ...rows.map((p)=>Card(child:ListTile(leading:const Icon(Icons.fastfood,color:red),
-        title:Text(p['name']),subtitle:Text(p['category']),trailing:Text(money.format(p['price'])))))
-    ]));
-}
-
-class SettingsPage extends StatelessWidget {
-  const SettingsPage({super.key});
-  @override Widget build(BuildContext context)=>ListView(padding:const EdgeInsets.all(16),children:[
-    const Text('إعدادات النظام',style:TextStyle(fontSize:22,fontWeight:FontWeight.bold)),
-    const Card(child:ListTile(leading:Icon(Icons.lock,color:red),title:Text('تصفير سجل المبيعات'),
-      subtitle:Text('يتطلب رقم المدير السري'))),
-    const Text('الرقم السري الافتراضي: 2580 — غيّره قبل الاستخدام الفعلي.',
-      style:TextStyle(color:red,fontWeight:FontWeight.bold)),
-    const SizedBox(height:8),
-    FilledButton.icon(onPressed:()async{
-      final pin=TextEditingController();
-      final ok=await showDialog<bool>(context:context,builder:(ctx)=>AlertDialog(
-        title:const Text('تأكيد المدير'),content:TextField(controller:pin,obscureText:true,
-          keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'الرقم السري')),
-        actions:[TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('إلغاء')),
-          FilledButton(onPressed:()=>Navigator.pop(ctx,pin.text=='2580'),child:const Text('تأكيد'))]));
-      if(ok==true){
-        await PosDb.instance.db.transaction((txn)async{
-          await txn.delete('order_items');await txn.delete('orders');
-          await txn.insert('audit',{'action':'SALES_RESET','at':DateTime.now().toIso8601String(),'details':'Reset via manager PIN'});
-        });
-        if(context.mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تم تصفير سجل المبيعات')));
-      } else if(pin.text.isNotEmpty&&context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('الرقم السري غير صحيح')));
-      }
-    },icon:const Icon(Icons.delete_forever),label:const Text('تصفير المبيعات')),
-    const Divider(),
-    const ListTile(leading:Icon(Icons.print),title:Text('الطابعات'),
-      subtitle:Text('إعداد الطابعة الرئيسية وطابعات الأقسام يحتاج ربط تعريفات الطابعات واختبارها على جهاز المطعم.')),
-    const ListTile(leading:Icon(Icons.photo),title:Text('صور الأصناف'),
-      subtitle:Text('حقول مسار الصور موجودة بقاعدة البيانات؛ واجهة رفع الصور غير مفعّلة في هذه النسخة.')),
-    const ListTile(leading:Icon(Icons.aspect_ratio),title:Text('أبعاد الواجهة'),
-      subtitle:Text('تثبيت أبعاد نافذة Windows والتحكم بها يحتاج إضافة إدارة نافذة خاصة بسطح المكتب.')),
-  ]);
-}
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CASHIR - McDonald's System</title>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@700;800;900&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;font-family:'Cairo',sans-serif;margin:0;padding:0}
+:root{--red:#DA291C;--yellow:#FFC72C;--dark:#27251F;--bg:#FFF8E1}
+body{background:var(--bg);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+header{background:var(--red);color:#fff;padding:12px 22px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 6px 20px rgba(218,41,28,.3)}
+header.logo{font-weight:900;font-size:28px;letter-spacing:1px;display:flex;align-items:center;gap:10px}
+header.logo span{background:var(--yellow);color:var(--dark);padding:2px 10px;border-radius:8px}
+.nav{padding:10px 16px;background:#fff;display:flex;gap:10px;border-bottom:3px solid var(--yellow);box-shadow:0 2px 10px rgba(0,0,0,.05)}
+.nav button{border:0;background:#f5f5f5;padding:10px 20px;border-radius:12px;font-weight:800;cursor:pointer;transition:.2s;border:2px solid transparent}
+.nav button.active{background:var(--yellow);color:var(--dark);border-color:var(--dark);transform:scale(1.05)}
+.content{flex:1;display:flex;overflow:hidden}
+.left{width:360px;background:#fff;border-left:4px solid var(--yellow);display:flex;flex-direction:column;overflow:auto}
+.left-t{padding:14px;background:var(--dark);color:var(--yellow);font-weight:900;text-align:center}
+.cat{padding:14px 16px;cursor:pointer;display:flex;justify-content:space-between;font-weight:800;border-bottom:1px solid #fff3cd;transition:.2s}
+.cat:hover{background:#FFF8E1;padding-right:22px}.cat.active{background:var(--red);color:#fff}
+.center{flex:1;display:flex;flex-direction:column;background:#FFFDF0}
+.topbar{padding:12px;background:#fff;display:flex;gap:10px;border-bottom:1px solid #ffe082}
+.topbar input{flex:1;padding:12px;border-radius:12px;border:2px solid var(--yellow);background:#fffde7;font-weight:700}
+.grid{padding:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;overflow:auto}
+.card{background:#fff;border-radius:18px;overflow:hidden;border:2px solid #ffe082;cursor:pointer;transition:.25s;box-shadow:0 6px 14px rgba(0,0,0,.06)}
+.card:hover{transform:translateY(-6px);border-color:var(--red);box-shadow:0 14px 28px rgba(0,0,0,.12)}
+.card img{width:100%;height:140px;object-fit:cover}.card-b{padding:10px}.card-n{font-weight:900;font-size:14px;min-height:36px}.card-p{color:var(--red);font-weight:900;font-size:18px}
+.cart{width:400px;background:#fff;border-right:4px solid var(--yellow);display:flex;flex-direction:column;box-shadow:-8px 0 30px rgba(0,0,0,.08)}
+.cart-h{padding:14px;background:var(--dark);color:#fff}.modes{display:flex;gap:6px;background:rgba(255,255,255,.15);padding:4px;border-radius:10px;margin-top:8px}
+.modes button{flex:1;border:0;background:transparent;color:#fff;padding:8px;border-radius:8px;font-weight:800;cursor:pointer}.modes button.active{background:var(--yellow);color:var(--dark)}
+.cart-list{flex:1;overflow:auto;padding:10px;background:#fff8e1}.row-i{background:#fff;border:1px solid #ffe082;border-radius:12px;padding:10px;display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.qty{display:flex;gap:6px;align-items:center}.qty button{width:28px;height:28px;border-radius:8px;border:1px solid #ffe082;background:#fff;font-weight:900;cursor:pointer}
+.cart-f{padding:14px;background:#fff;border-top:3px solid var(--yellow)}.line{display:flex;justify-content:space-between;margin:4px 0}.total{font-size:20px;font-weight:900;border-top:2px dashed #ffe082;padding-top:8px;margin-top:8px}
+.btn{border:0;padding:10px 16px;border-radius:10px;font-weight:900;cursor:pointer;color:#fff;transition:.2s}.btn-red{background:var(--red)}.btn-dark{background:var(--dark)}.btn-yellow{background:var(--yellow);color:var(--dark)}.btn-green{background:#2e7d32}.btn-gray{background:#e0e0e0;color:#000}
+.page{display:none;flex:1;overflow:auto;padding:18px;background:var(--bg)}.page.active{display:block}
+.t-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px}
+.t-card{background:#fff;border-radius:16px;padding:16px;text-align:center;border:2px solid #ffe082;cursor:pointer;font-weight:800}.t-card.busy{border-color:var(--red);background:#ffebee}.t-card.sel{outline:3px solid var(--dark)}
+.box{background:#fff;padding:16px;border-radius:16px;border:2px solid #ffe082;margin-bottom:14px}
+.box input,.box select{width:100%;padding:10px;border:2px solid #ffe082;border-radius:10px;margin-top:6px;background:#fffde7;font-weight:700}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}.list-row{background:#fff;border:1px solid #ffe082;padding:10px;border-radius:12px;display:flex;gap:10px;align-items:center;margin-bottom:8px}.list-row img{width:60px;height:60px;border-radius:10px;object-fit:cover}
+.modal{position:fixed;inset:0;background:rgba(39,37,31,.7);display:none;align-items:center;justify-content:center;z-index:99}.modal.open{display:flex}.modal-b{background:#fff;width:92%;max-width:480px;border-radius:18px;padding:18px;border:4px solid var(--yellow);max-height:90vh;overflow:auto}
+table{width:100%;background:#fff;border-radius:14px;overflow:hidden;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #fff3cd;text-align:right;font-size:12px}th{background:var(--yellow);font-weight:900}
+.tag{background:var(--yellow);padding:3px 8px;border-radius:20px;font-size:10px;font-weight:800}
+</style>
+</head>
+<body>
+<header><div class="logo">🍟 CASHIR <span>MCD STYLE</span> <b id="orderBadge" style="background:#fff;color:#DA291C;padding:2px 10px;border-radius:8px;margin-right:10px">#1</b></div><div style="display:flex;gap:8px"><button class="btn btn-yellow" onclick="openM('mTable')">+ ترابيزة</button><button class="btn btn-dark" onclick="openM('mProd')">+ صنف</button></div></header>
+<div class="nav"><button id="b-pos" class="active" onclick="show('pos')">نقطة البيع</button><button id="b-tables" onclick="show('tables')">الترابيزات</button><button id="b-menu" onclick="show('menu')">المنيو والطابعات</button><button id="b-sales" onclick="show('sales')">المبيعات</button><div style="margin-right:auto;display:flex;gap:8px"><div style="background:#fffde7;padding:6px 10px;border-radius:8px;font-weight:800;border:1px solid #ffe082">دفتر <span id="batchNum">1</span></div><div style="background:var(--yellow);padding:6px 10px;border-radius:8px;font-weight:900">اوردر <span id="curOrderNum">1</span>/500</div></div></div>
+<div class="content"><div id="page-pos" class="page active" style="display:flex;padding:0"><div class="left"><div class="left-t">🍔 اقسام ماكدونالدز</div><div id="catList"></div></div><div class="center"><div class="topbar"><input id="search" placeholder="🔍 ابحث... برجر، بطاطس، كومبو" oninput="renderP()"><button class="btn btn-dark" onclick="search.value='';renderP()">مسح</button></div><div id="prodGrid" class="grid"></div></div><div class="cart"><div class="cart-h"><div style="display:flex;justify-content:space-between;font-weight:900"><span id="curTable">تيك اواي</span><span id="curTime" style="font-size:10px"></span></div><div class="modes"><button id="mode-take" class="active" onclick="setMode('takeaway')">تيك اواي 🥡</button><button id="mode-hall" onclick="setMode('hall')">صالة 🍽️</button><button id="mode-del" onclick="setMode('delivery')">دليفري 🛵</button></div></div><div id="cartList" class="cart-list"></div><div class="cart-f"><div class="line"><span>العدد</span><b id="countItems">0</b></div><div class="line"><span>المجموع</span><b id="sub">0 ج</b></div><div class="line total"><span>الاجمالي</span><b id="total">0 ج</b></div><div class="row2" style="margin-top:10px"><button class="btn btn-gray" id="holdBtn" style="display:none" onclick="hold()">تعليق</button><button class="btn btn-green" style="flex:1;padding:16px;font-size:17px" onclick="openM('mPay')">دفع وطباعة 🧾</button></div></div></div></div>
+<div id="page-tables" class="page"><div class="box"><h3>الترابيزات - اضغط للانتقال</h3><div id="tGrid" class="t-grid" style="margin-top:12px"></div></div></div>
+<div id="page-menu" class="page"><div class="box" style="border-color:var(--red)"><h3>🖨️ الطابعات (مطبخ برجر، بطاطس، مشروبات)</h3><div class="row2"><input id="newPrinter" placeholder="اسم الطابعة"><button class="btn btn-dark" onclick="addPrinter()">اضافة</button></div><div id="printerTags" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px"></div><hr style="margin:12px 0"><div id="catMap"></div><div class="row2" style="margin-top:10px"><select id="mainSel"></select><button class="btn btn-red" onclick="setMain()">رئيسية</button></div><div>الرئيسية: <b id="mainName"></b></div></div><div class="box"><h3>الاقسام</h3><div class="row2"><input id="newCat" placeholder="قسم جديد"><button class="btn btn-dark" onclick="addCat()">اضافة</button></div><div id="catTags" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div></div><div class="box"><h3>الاصناف</h3><div id="menuList"></div></div></div>
+<div id="page-sales" class="page"><div class="box" style="display:flex;justify-content:space-between"><h3>المبيعات دفتر <span id="batchNum2">1</span></h3><div style="display:flex;gap:6px"><button class="btn btn-gray" onclick="exportExcel()">Excel</button><button class="btn btn-red" onclick="clearSales()">مسح</button></div></div><table><thead><tr><th>#</th><th>التاريخ</th><th>النوع</th><th>العميل</th><th>الاصناف</th><th>الاجمالي</th></tr></thead><tbody id="salesBody"></tbody></table><div id="archived"></div></div></div>
+<div id="mTable" class="modal"><div class="modal-b"><h3>ترابيزة جديدة</h3><input id="tName" placeholder="T5"><div class="row2" style="margin-top:8px"><input id="tCap" type="number" placeholder="افراد"><select id="tStat"><option value="free">فارغة</option><option value="busy">مشغولة</option></select></div><div class="row2" style="margin-top:10px"><button class="btn btn-gray" onclick="closeM()">الغاء</button><button class="btn btn-dark" onclick="saveTable()">حفظ</button></div></div></div>
+<div id="mProd" class="modal"><div class="modal-b"><h3>صنف ماكدونالدز جديد</h3><input id="pName" placeholder="مثال: بيج ماك كومبو"><div class="row2" style="margin-top:8px"><select id="pCat"></select><input id="pPrice" type="number" placeholder="السعر"></div><input id="pImg" placeholder="رابط الصورة" style="margin-top:8px;width:100%;padding:10px;border:2px solid #ffe082;border-radius:10px"><input type="file" id="pFile" accept="image/*" style="margin-top:6px"><div class="row2" style="margin-top:10px"><button class="btn btn-gray" onclick="closeM()">الغاء</button><button class="btn btn-red" onclick="saveProd()">حفظ</button></div></div></div>
+<div id="mPay" class="modal"><div class="modal-b"><h3>دفع - <span id="payTable"></span> #<span id="payOrder"></span></h3><div style="margin-top:10px;background:#fffde7;padding:10px;border-radius:10px"><div class="row2"><label><input type="checkbox" id="useTax" onchange="calc()"> ضريبة</label><input id="taxVal" type="number" value="14" oninput="calc()"></div><div class="row2" style="margin-top:6px"><label><input type="checkbox" id="useServ" onchange="calc()"> خدمة</label><input id="servVal" type="number" value="12" oninput="calc()"></div><div class="row2" style="margin-top:6px"><input id="discVal" type="number" value="0" placeholder="خصم" oninput="calc()"><select id="payMethod"><option>كاش</option><option>فيزا</option><option>محفظة</option></select></div><div style="background:#fff;padding:8px;border-radius:8px;margin-top:8px"><div class="line"><span>المطلوب</span><b id="payTotal">0</b></div><div class="row2" style="margin-top:6px"><input id="paidVal" type="number" placeholder="المدفوع" oninput="calcChange()"><span>الباقي: <b id="change">0</b></span></div></div><div style="margin-top:8px"><label><input type="checkbox" id="printCust" checked> رسيد عميل</label><br><label><input type="checkbox" id="printKit" checked> بون مطبخ لكل قسم</label></div><div class="row2" style="margin-top:10px"><button class="btn btn-gray" onclick="closeM()">الغاء</button><button class="btn btn-green" onclick="confirmPay()">تأكيد وطباعة</button></div></div></div></div>
+<script>
+let DB=JSON.parse(localStorage.getItem('cashir_mcd')||'null')||{tables:[{id:1,name:'T1',cap:4,status:'free',order:[]},{id:2,name:'T2',cap:4,status:'free',order:[]},{id:3,name:'T3',cap:6,status:'free',order:[]}],cats:['برجر','كومبو','بطاطس ومقبلات','مشروبات','حلويات'],prods:[{name:'بيج ماك',cat:'برجر',price:145,img:'https://images.unsplash.com/photo-1568909344668-6f14a07b56a0?w=500'},{name:'بيج ماك كومبو وسط',cat:'كومبو',price:220,img:'https://images.unsplash.com/photo-1571091718767-18b5b1457add?w=500'},{name:'تشيز برجر',cat:'برجر',price:85,img:'https://images.unsplash.com/photo-1550547660-d9450f859349?w=500'},{name:'بطاطس كبيرة',cat:'بطاطس ومقبلات',price:55,img:'https://images.unsplash.com/photo-1630384060421-cb20d0e0649d?w=500'},{name:'ناجتس 9 قطع',cat:'بطاطس ومقبلات',price:120,img:'https://images.unsplash.com/photo-1562967914-608f82629710?w=500'},{name:'كولا كبيرة',cat:'مشروبات',price:35,img:'https://images.unsplash.com/photo-1554866585-cd94860890b2?w=500'},{name:'ماك فلوري اوريو',cat:'حلويات',price:65,img:'https://images.unsplash.com/photo-1563805042-7684c019e1cb?w=500'}],sales:[],activeTable:1,filterCat:'all',mode:'takeaway',takeawayOrder:[],deliveryPending:[],printers:[{id:1,name:'كاشير رئيسي CASHIR'},{id:2,name:'مطبخ برجر'},{id:3,name:'مطبخ بطاطس'},{id:4,name:'بار مشروبات'}],mainPrinterId:1,catPrinters:{'برجر':2,'كومبو':2,'بطاطس ومقبلات':3,'مشروبات':4},orderCounter:1,batchNumber:1,archived:[]};
+let tmpImg='';setInterval(()=>{let d=document.getElementById('curTime');if(d)d.textContent=new Date().toLocaleTimeString('ar-EG')},1000);
+function save(){localStorage.setItem('cashir_mcd',JSON.stringify(DB));upd()}function upd(){document.getElementById('orderBadge').textContent='#'+DB.orderCounter;['curOrderNum','batchNum','batchNum2'].forEach(id=>{let e=document.getElementById(id);if(e)e.textContent=id.includes('batch')?DB.batchNumber:DB.orderCounter})}
+function show(p){document.querySelectorAll('.page').forEach(e=>e.style.display='none');document.getElementById('page-'+p).style.display=p==='pos'?'flex':'block';document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active'));document.getElementById('b-'+p).classList.add('active');if(p==='tables')renderT();if(p==='menu'){renderMenu();renderPrinters()}if(p==='sales')renderSales();if(p==='pos'){renderCats();renderP();renderCart()}}
+function renderCats(){let box=document.getElementById('catList');box.innerHTML=`<div class="cat ${DB.filterCat==='all'?'active':''}" onclick="setCat('all')"><span>الكل 🍟</span><span>${DB.prods.length}</span></div>`;DB.cats.forEach(c=>{let cnt=DB.prods.filter(x=>x.cat===c).length;let d=document.createElement('div');d.className='cat '+(DB.filterCat===c?'active':'');d.innerHTML=`<span>${c}</span><span class="tag">${cnt} | ${DB.printers.find(x=>x.id==DB.catPrinters[c])?.name||'بدون'}</span>`;d.onclick=()=>setCat(c);box.appendChild(d)});let s=document.getElementById('pCat');if(s){s.innerHTML='';DB.cats.forEach(c=>{let o=document.createElement('option');o.value=c;o.textContent=c;s.appendChild(o)})}}
+function setCat(c){DB.filterCat=c;save();renderCats();renderP()}function renderP(){let q=document.getElementById('search').value.toLowerCase();let g=document.getElementById('prodGrid');g.innerHTML='';DB.prods.filter(p=>(DB.filterCat==='all'||p.cat===DB.filterCat)&&p.name.toLowerCase().includes(q)).forEach(p=>{let i=DB.prods.indexOf(p);let card=document.createElement('div');card.className='card';card.innerHTML=`<img src="${p.img}" onerror="this.src='https://via.placeholder.com/400'"><div class="card-b"><div class="card-n">${p.name}</div><div style="font-size:10px;background:#fff8e1;padding:2px 6px;border-radius:10px;display:inline-block">${p.cat}</div><div class="card-p">${p.price} ج</div></div>`;card.onclick=()=>add(i);g.appendChild(card)})}
+function renderT(){let g=document.getElementById('tGrid');g.innerHTML='';DB.tables.forEach(t=>{let d=document.createElement('div');d.className='t-card '+t.status+(DB.activeTable===t.id?' sel':'');d.innerHTML=`<div>🪑</div><b>${t.name}</b><div style="font-size:11px">${t.cap} افراد - ${t.status==='free'?'فارغة':'مشغولة'}</div>`;d.onclick=()=>{DB.activeTable=t.id;DB.mode='hall';save();setMode('hall');show('pos')};g.appendChild(d)})}
+function getOrder(){if(DB.mode==='hall')return DB.tables.find(x=>x.id===DB.activeTable)?.order||[];return DB.takeawayOrder}
+function renderCart(){let cur=document.getElementById('curTable');if(DB.mode==='takeaway')cur.textContent='تيك اواي #'+DB.orderCounter;else if(DB.mode==='delivery')cur.textContent='دليفري #'+DB.orderCounter;else{let t=DB.tables.find(x=>x.id===DB.activeTable);cur.textContent=t?t.name+' #'+DB.orderCounter:'اختر ترابيزة'}let list=document.getElementById('cartList');list.innerHTML='';getOrder().forEach((o,i)=>{let r=document.createElement('div');r.className='row-i';r.innerHTML=`<div><b>${o.name}</b><div style="font-size:10px">${o.cat} ${o.price}ج</div></div><div class="qty"><button onclick="chg(${i},-1)">-</button><span>${o.qty}</span><button onclick="chg(${i},1)">+</button><button onclick="delI(${i})" style="background:#ffebee">×</button></div>`;list.appendChild(r)});calc()}
+function add(idx){let p=DB.prods[idx];if(DB.mode==='hall'){let t=DB.tables.find(x=>x.id===DB.activeTable);if(!t){alert('اختر ترابيزة');show('tables');return}let f=t.order.find(o=>o.name===p.name);if(f)f.qty++;else t.order.push({name:p.name,price:p.price,qty:1,cat:p.cat});t.status='busy'}else{let f=DB.takeawayOrder.find(o=>o.name===p.name);if(f)f.qty++;else DB.takeawayOrder.push({name:p.name,price:p.price,qty:1,cat:p.cat})}save();renderCart();renderT()}
+function chg(i,d){let o=getOrder();o[i].qty+=d;if(o[i].qty<=0)o.splice(i,1);save();renderCart()}function delI(i){let o=getOrder();o.splice(i,1);if(DB.mode==='hall'){let t=DB.tables.find(x=>x.id===DB.activeTable);if(!t.order.length)t.status='free'}save();renderCart();renderT()}
+function calc(){let o=getOrder();let sub=o.reduce((s,x)=>s+x.price*x.qty,0);let tax=document.getElementById('useTax')?.checked?sub*parseFloat(document.getElementById('taxVal').value||0)/100:0;let serv=document.getElementById('useServ')?.checked?sub*parseFloat(document.getElementById('servVal').value||0)/100:0;let disc=parseFloat(document.getElementById('discVal')?.value||0);let total=sub+tax+serv-disc;document.getElementById('sub').textContent=sub+' ج';document.getElementById('total').textContent=total+' ج';let pt=document.getElementById('payTotal');if(pt)pt.textContent=total+' ج';document.getElementById('countItems').textContent=o.length;return{order:o,total}}function calcChange(){let t=calc().total;let p=parseFloat(document.getElementById('paidVal').value||0);document.getElementById('change').textContent=(p-t)+' ج'}
+function setMode(m){DB.mode=m;save();document.querySelectorAll('.modes button').forEach(b=>b.classList.remove('active'));document.getElementById('mode-'+(m==='takeaway'?'take':m==='hall'?'hall':'del')).classList.add('active');document.getElementById('holdBtn').style.display=m==='delivery'?'block':'none';renderCart()}
+function openM(id){document.getElementById(id).classList.add('open');if(id==='mPay'){if(!getOrder().length)return alert('فاضي');document.getElementById('payTable').textContent=DB.mode==='hall'?DB.tables.find(x=>x.id===DB.activeTable).name:DB.mode;document.getElementById('payOrder').textContent=DB.orderCounter;calc()}}function closeM(){document.querySelectorAll('.modal').forEach(m=>m.classList.remove('open'))}
+function saveTable(){let n=document.getElementById('tName').value||'T'+(DB.tables.length+1);let cap=parseInt(document.getElementById('tCap').value||4);let st=document.getElementById('tStat').value;DB.tables.push({id:Date.now(),name:n,cap,status:st,order:[]});save();renderT();closeM()}
+document.getElementById('pFile')?.addEventListener('change',e=>{let r=new FileReader();r.onload=()=>tmpImg=r.result;r.readAsDataURL(e.target.files[0])});
+function saveProd(){let name=document.getElementById('pName').value.trim();if(!name)return alert('اسم');let cat=document.getElementById('pCat').value;let price=parseFloat(document.getElementById('pPrice').value||0);let img=document.getElementById('pImg').value||tmpImg||'https://via.placeholder.com/400';DB.prods.push({name,cat,price,img});save();renderP();renderMenu();closeM()}
+function renderMenu(){let tags=document.getElementById('catTags');tags.innerHTML='';DB.cats.forEach((c,i)=>{let s=document.createElement('span');s.style.cssText='background:#fff;border:2px solid #ffe082;padding:5px 10px;border-radius:20px;font-weight:800';s.innerHTML=`${c} <b style="cursor:pointer;color:red" onclick="delCat(${i})">×</b>`;tags.appendChild(s)});let list=document.getElementById('menuList');list.innerHTML='';DB.prods.forEach((p,i)=>{let d=document.createElement('div');d.className='list-row';d.innerHTML=`<img src="${p.img}"><div style="flex:1"><b>${p.name}</b><div style="font-size:11px">${p.cat} ${p.price}ج</div></div><button class="btn btn-red" onclick="delProd(${i})">مسح</button>`;list.appendChild(d)});renderCats()}
+function addCat(){let v=document.getElementById('newCat').value.trim();if(!v)return;DB.cats.push(v);document.getElementById('newCat').value='';save();renderMenu()}function delCat(i){if(!confirm('مسح؟'))return;DB.cats.splice(i,1);save();renderMenu()}function delProd(i){if(!confirm('مسح؟'))return;DB.prods.splice(i,1);save();renderMenu();renderP()}
+function renderPrinters(){let box=document.getElementById('printerTags');box.innerHTML='';let sel=document.getElementById('mainSel');sel.innerHTML='';DB.printers.forEach(pr=>{let s=document.createElement('span');s.className='tag';s.innerHTML=`${pr.name} <b onclick="delPrinter(${pr.id})" style="cursor:pointer">×</b>`;box.appendChild(s);let o=document.createElement('option');o.value=pr.id;o.textContent=pr.name;sel.appendChild(o)});document.getElementById('mainName').textContent=DB.printers.find(p=>p.id==DB.mainPrinterId)?.name||'';let map=document.getElementById('catMap');map.innerHTML='';DB.cats.forEach(cat=>{let opts=DB.printers.map(pr=>`<option value="${pr.id}" ${DB.catPrinters[cat]==pr.id?'selected':''}>${pr.name}</option>`).join('');let div=document.createElement('div');div.style.cssText='display:flex;gap:8px;align-items:center;margin-bottom:6px;background:#fff;padding:6px;border-radius:8px';div.innerHTML=`<span style="flex:1;font-weight:800">${cat}</span><select onchange="setCatPrinter('${cat}',this.value)" style="flex:2;padding:6px;border-radius:6px"><option value="">بدون</option>${opts}</select>`;map.appendChild(div)})}
+function addPrinter(){let v=document.getElementById('newPrinter').value.trim();if(!v)return;DB.printers.push({id:Date.now(),name:v});document.getElementById('newPrinter').value='';save();renderPrinters()}function delPrinter(id){if(DB.printers.length<=1)return alert('لازم واحدة');DB.printers=DB.printers.filter(p=>p.id!==id);save();renderPrinters()}function setCatPrinter(cat,id){if(id)DB.catPrinters[cat]=parseInt(id);else delete DB.catPrinters[cat];save()}function setMain(){DB.mainPrinterId=parseInt(document.getElementById('mainSel').value);save();renderPrinters()}
+function confirmPay(){let c=calc();let sale={orderNo:DB.orderCounter,batch:DB.batchNumber,date:new Date().toLocaleString('ar-EG'),type:DB.mode==='hall'?'صالة':DB.mode==='takeaway'?'تيك اواي':'دليفري',table:DB.mode==='hall'?DB.tables.find(x=>x.id===DB.activeTable).name:DB.mode,items:c.order.map(o=>`${o.name} x${o.qty}`).join(', '),total:c.total,details:c.order};DB.sales.unshift(sale);if(document.getElementById('printCust').checked)printCust(sale);if(document.getElementById('printKit').checked)printKit(sale);DB.orderCounter++;if(DB.orderCounter>500){DB.archived.push({batch:DB.batchNumber,sales:[...DB.sales]});DB.sales=[];DB.batchNumber++;DB.orderCounter=1}if(DB.mode==='hall'){let t=DB.tables.find(x=>x.id===DB.activeTable);t.order=[];t.status='free'}else DB.takeawayOrder=[];save();renderCart();renderT();closeM();renderSales()}
+function printCust(s){let w=window.open('','','width=380,height=600');w.document.write(`<html dir=rtl><body style="font-family:Cairo;padding:12px"><h2 style="text-align:center;color:#DA291C">CASHIR - ماكدونالدز ستايل</h2><div style="text-align:center;border:2px dashed #000;padding:8px;font-size:22px;font-weight:900">#${s.orderNo} دفتر ${s.batch}</div><div>${s.type} - ${s.table} - ${s.date}</div><hr>${s.details.map(o=>`<div style="display:flex;justify-content:space-between"><span>${o.name} x${o.qty}</span><span>${o.price*o.qty}</span></div>`).join('')}<hr><b>الاجمالي ${s.total} ج</b><script>window.print();setTimeout(()=>close(),600)<\/script></body></html>`)}
+function printKit(s){let grouped={};s.details.forEach(i=>{if(!grouped[i.cat])grouped[i.cat]=[];grouped[i.cat].push(i)});Object.keys(grouped).forEach(cat=>{let pr=DB.printers.find(p=>p.id==DB.catPrinters[cat])?.name||cat;let items=grouped[cat];let w=window.open('','','width=380,height=500');w.document.write(`<html dir=rtl><body style="font-family:Cairo"><h2 style="background:#000;color:#FFC72C;text-align:center;padding:8px">بون ${cat} - ${pr}</h2><div style="text-align:center;font-weight:900;font-size:20px">#${s.orderNo} ${s.table}</div><hr>${items.map(o=>`<div style="font-size:18px;font-weight:900">${o.qty} X ${o.name}</div>`).join('')}<script>window.print();setTimeout(()=>close(),600)<\/script></body></html>`)})}
+function hold(){let c=calc();if(!c.order.length)return;let n=prompt('اسم العميل:');if(!n)return;DB.deliveryPending.push({id:Date.now(),name:n,order:[...c.order],total:c.total});DB.takeawayOrder=[];save();renderCart()}
+function renderSales(){let b=document.getElementById('salesBody');b.innerHTML='';DB.sales.forEach(s=>{let tr=document.createElement('tr');tr.innerHTML=`<td>#${s.orderNo}</td><td>${s.date}</td><td>${s.type}</td><td>${s.table}</td><td>${s.items}</td><td>${s.total} ج</td>`;b.appendChild(tr)});upd()}
+function clearSales(){if(confirm('مسح؟')){DB.sales=[];save();renderSales()}}function exportExcel(){let csv='رقم,التاريخ,النوع,العميل,الاصناف,الاجمالي\n'+DB.sales.map(s=>`${s.orderNo},"${s.date}","${s.type}","${s.table}","${s.items}",${s.total}`).join('\n');let blob=new Blob([csv],{type:'text/csv'});let a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='cashir_sales.csv';a.click()}
+renderCats();renderP();renderT();renderSales();renderPrinters();upd();
+</script></body></html>
